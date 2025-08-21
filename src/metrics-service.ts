@@ -5,7 +5,7 @@ export type GaugeValueCollector = () => any;
 
 export namespace MetricsService {
 
-    const registry = new metrics.Registry();
+    export const registry = new metrics.Registry();
     const labels = new Map<string, string>();
     const gauges = new Map<string, GaugeValueCollector>();
 
@@ -14,7 +14,6 @@ export namespace MetricsService {
     export function setProjectName(projectName: string): void {
         metricsPrefix = `${projectName}_`;
     }
-
 
     /**
      * Set static labels to every metric emitted by this registry
