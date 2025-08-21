@@ -1,5 +1,5 @@
 import {MetricsService} from '../src/index';
-import {Gauge} from "prom-client";
+import {Gauge} from 'prom-client';
 
 describe('MetricsService', () => {
 
@@ -18,7 +18,7 @@ describe('MetricsService', () => {
             help: 'test help'
         });
 
-        MetricsService.registry.registerMetric(gauge);
+        MetricsService.getInternalRegistry().registerMetric(gauge);
 
         gauge.set({'test_label': 'zzzeee'}, 10);
 

@@ -1,15 +1,20 @@
 import * as metrics from 'prom-client';
 import {Collection, identity, option} from 'scats';
+import {Registry} from 'prom-client';
 
 export type GaugeValueCollector = () => any;
 
 export namespace MetricsService {
 
-    export const registry = new metrics.Registry();
+    const registry = new metrics.Registry();
     const labels = new Map<string, string>();
     const gauges = new Map<string, GaugeValueCollector>();
 
     let metricsPrefix = '';
+
+    export function getInternalRegistry(): Registry {
+        return registry;
+    }
 
     export function setProjectName(projectName: string): void {
         metricsPrefix = `${projectName}_`;
