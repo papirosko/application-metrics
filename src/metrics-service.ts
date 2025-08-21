@@ -1,5 +1,6 @@
 import * as metrics from 'prom-client';
 import {Collection, identity, option} from 'scats';
+import {Registry} from 'prom-client';
 
 export type GaugeValueCollector = () => any;
 
@@ -11,10 +12,13 @@ export namespace MetricsService {
 
     let metricsPrefix = '';
 
+    export function getInternalRegistry(): Registry {
+        return registry;
+    }
+
     export function setProjectName(projectName: string): void {
         metricsPrefix = `${projectName}_`;
     }
-
 
     /**
      * Set static labels to every metric emitted by this registry
