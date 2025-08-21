@@ -1,6 +1,6 @@
 {
   "name": "application-metrics",
-  "version": "1.2.3",
+  "version": "1.2.2",
   "type": "module",
   "description": "Metrics for a NodeJS application",
   "main": "dist/index.js",
