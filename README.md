@@ -228,3 +228,28 @@ memory_heapTotal 224940032
 # TYPE gauge_memory_heapUsed gauge
 memory_heapUsed 185016864
 ```
+
+Metric labels
+=============
+Metric calls accept an optional map of label names to string values:
+
+```typescript
+MetricsService.counter('requests', {method: 'GET', route: '/items'}).inc();
+MetricsService.histogram('response_size', {route: '/items'}).observe(512);
+MetricsService.gauge('queue_depth', () => queue.length, {queue: 'mail'});
+MetricsService.timer('request_duration', undefined, {route: '/items'}).time(() => process());
+// Existing timer configuration remains the second argument.
+MetricsService.timer('request_duration', {maxAgeSeconds: 300}, {route: '/items'}).start();
+```
+
+The `@Metric` decorator also accepts labels in its configuration:
+`@Metric({name: 'save', labels: {operation: 'write'}})`.
+
+Label order does not matter. Different values create separate series of the same
+metric. Different sets of label names for the same metric name receive numeric
+suffixes (`requests_1`, `requests_2`, etc.), in registration order.
+Existing calls without labels continue to work. Histograms retain their existing
+summary behavior. JSON and console output identify labeled series using keys such
+as `requests{method="GET",route="/items"}`, while unlabeled keys remain unchanged.
+Use `setStaticLabels({env: 'production'})` to add labels to every Prometheus metric;
+`label(name, value)` continues to provide separate JSON/console metadata.
