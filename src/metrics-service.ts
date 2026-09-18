@@ -3,12 +3,39 @@ import {Collection, identity, option} from 'scats';
 import {Registry} from 'prom-client';
 
 export type GaugeValueCollector = () => any;
+export type Labels = Readonly<Record<string, string>>;
 
 export namespace MetricsService {
 
     const registry = new metrics.Registry();
     const labels = new Map<string, string>();
-    const gauges = new Map<string, GaugeValueCollector>();
+    const gauges = new Map<string, {name: string; labels: Labels; collect: GaugeValueCollector}>();
+    const metricNames = new Map<string, string>();
+
+    const getMetric = <M extends metrics.Counter<string> | metrics.Gauge<string> | metrics.Summary<string>>(
+        name: string, labels: Labels, create: (name: string, labelNames: string[]) => M,
+    ): M => {
+        const labelNames = Object.keys(labels).sort();
+        const key = JSON.stringify([name, labelNames]);
+        const cachedName = metricNames.get(key);
+        if (cachedName) {
+            const existing = registry.getSingleMetric(cachedName);
+            if (existing) return existing as M;
+        }
+        let metricName = name;
+        let suffix = 1;
+        while (registry.getSingleMetric(metricName)) {
+            metricName = `${name}_${suffix++}`;
+        }
+        const metric = create(metricName, labelNames);
+        metricNames.set(key, metricName);
+        return metric;
+    };
+
+    const seriesName = (name: string, labels: Labels): string => {
+        const names = Object.keys(labels).sort();
+        return names.length ? `${name}{${names.map(key => `${key}=${JSON.stringify(labels[key])}`).join(',')}}` : name;
+    };
 
     let metricsPrefix = '';
 
@@ -32,40 +59,29 @@ export namespace MetricsService {
     export function clear(): void {
         labels.clear();
         gauges.clear();
+        metricNames.clear();
         registry.clear();
         metricsPrefix = '';
     }
 
 
-    export function counter(name: string): metrics.Counter<string> {
-        const counterMetricName = `counter_${metricsPrefix}${name}`;
-        let existing = registry.getSingleMetric(counterMetricName) as metrics.Counter<string>;
-        if (!existing) {
-            existing = new metrics.Counter({
-                name: counterMetricName,
-                help: counterMetricName,
-            });
-            registry.registerMetric(existing);
-        }
-
-        return existing;
+    export function counter(name: string, labels?: undefined): metrics.Counter<string>;
+    export function counter(name: string, labels: Labels): metrics.Counter.Internal;
+    export function counter(name: string, labels?: Labels): metrics.Counter<string> | metrics.Counter.Internal;
+    export function counter(name: string, labels?: Labels): metrics.Counter<string> | metrics.Counter.Internal {
+        const metric = getMetric(`counter_${metricsPrefix}${name}`, labels ?? {}, (name, labelNames) =>
+            new metrics.Counter({name, help: name, labelNames, registers: [registry]}));
+        return labels === undefined ? metric : metric.labels(...Object.keys(labels).sort().map(name => labels[name]));
     }
 
-
-    export function histogram(name: string): metrics.Summary<string> {
-        const counterMetricName = `histogram_${metricsPrefix}${name}`;
-        let existing = registry.getSingleMetric(counterMetricName) as metrics.Summary<string>;
-        if (!existing) {
-            existing = new metrics.Summary({
-                name: counterMetricName,
-                help: counterMetricName,
-            });
-            registry.registerMetric(existing);
-        }
-
-        return existing;
+    export function histogram(name: string, labels?: undefined): metrics.Summary<string>;
+    export function histogram(name: string, labels: Labels): metrics.Summary.Internal<string>;
+    export function histogram(name: string, labels?: Labels): metrics.Summary<string> | metrics.Summary.Internal<string>;
+    export function histogram(name: string, labels?: Labels): metrics.Summary<string> | metrics.Summary.Internal<string> {
+        const metric = getMetric(`histogram_${metricsPrefix}${name}`, labels ?? {}, (name, labelNames) =>
+            new metrics.Summary({name, help: name, labelNames, registers: [registry]}));
+        return labels === undefined ? metric : metric.labels(...Object.keys(labels).sort().map(name => labels[name]));
     }
-
 
     export function label(name: string, value: string): void {
         labels.set(name, value);
@@ -93,19 +109,12 @@ export namespace MetricsService {
     }
 
     export function flushGauges(): void {
-        gauges.forEach((valueCollector, key) => {
-            const value = valueCollector();
+        gauges.forEach(({name, labels, collect}) => {
+            const value = collect();
             if (!isNaN(value)) {
-                const numGaugeMetricName = `gauge_${key}`;
-                let existing = registry.getSingleMetric(numGaugeMetricName) as metrics.Gauge<string>;
-                if (!existing) {
-                    existing = new metrics.Gauge({
-                        name: numGaugeMetricName,
-                        help: numGaugeMetricName,
-                    });
-                    registry.registerMetric(existing);
-                }
-                existing.set(value);
+                const metric = getMetric(`gauge_${name}`, labels, (name, labelNames) =>
+                    new metrics.Gauge({name, help: name, labelNames, registers: [registry]}));
+                metric.set(labels, value);
             }
         });
     }
@@ -125,43 +134,37 @@ export namespace MetricsService {
         });
 
         flushGauges();
-        gauges.forEach((value, key) => {
-            res.gauges[key] = value();
+        gauges.forEach(({collect}, key) => {
+            const value = collect();
+            if (isNaN(value)) res.gauges[key] = value;
         });
 
         const arrayOfMetrics = Collection.from(await registry.getMetricsAsArray())
             .sort((a, b) => a.name.localeCompare(b.name));
         for (const metric of arrayOfMetrics) {
-            if (metric.name.startsWith('counter_')) {
-                const cnt = registry.getSingleMetric(metric.name) as any;
-                res.counters[metric.name.replace('counter_', '')] = (Object.values(cnt.hashMap)[0] as any).value;
-            } else if (metric.name.startsWith('gauge_')) {
-                const cnt = registry.getSingleMetric(metric.name) as any;
-                res.gauges[metric.name.replace('gauge_', '')] = (Object.values(cnt.hashMap)[0] as any).value;
-            } else if (metric.name.startsWith('timer_')) {
-                const cnt = registry.getSingleMetric(metric.name) as any;
-                const values = await cnt.get();
-                res.timers[metric.name.replace('timer_', '')] = {
-                    '50': option(values.values[2]).map(x => x.value).orUndefined,
-                    '90': option(values.values[3]).map(x => x.value).orUndefined,
-                    '95': option(values.values[4]).map(x => x.value).orUndefined,
-                    '99': option(values.values[5]).map(x => x.value).orUndefined,
-                    count: option(values.values[8]).map(x => x.value).orUndefined,
-                };
-            } else if (metric.name.startsWith('histogram_')) {
-                const h = registry.getSingleMetric(metric.name) as any;
-                const values = await h.get();
-                res.histograms[metric.name.replace('histogram_', '')] = {
-                    '50': values.values[2].value,
-                    '90': values.values[3].value,
-                    '95': values.values[4].value,
-                    '99': values.values[5].value,
-                    count: values.values[8].value,
-                };
+            if (metric.name.startsWith('counter_') || metric.name.startsWith('gauge_')) {
+                const values = await (registry.getSingleMetric(metric.name) as metrics.Counter<string> | metrics.Gauge<string>).get();
+                const target = metric.name.startsWith('counter_') ? res.counters : res.gauges;
+                const name = metric.name.replace(/^(counter_|gauge_)/, '');
+                for (const sample of values.values) {
+                    target[seriesName(name, sample.labels as Labels)] = sample.value;
+                }
+            } else if (metric.name.startsWith('timer_') || metric.name.startsWith('histogram_')) {
+                const values = await (registry.getSingleMetric(metric.name) as metrics.Summary<string>).get();
+                const target = metric.name.startsWith('timer_') ? res.timers : res.histograms;
+                const name = metric.name.replace(/^(timer_|histogram_)/, '');
+                for (const sample of values.values) {
+                    const {quantile, ...labels} = sample.labels;
+                    const key = seriesName(name, labels as Labels);
+                    if (!target[key]) target[key] = {} as TimerJson;
+                    if (sample.metricName === `${metric.name}_count`) {
+                        target[key].count = sample.value;
+                    } else if (quantile !== undefined && [0.5, 0.9, 0.95, 0.99].includes(Number(quantile))) {
+                        target[key][String(Number(quantile) * 100) as '50' | '90' | '95' | '99'] = sample.value;
+                    }
+                }
             } else {
-                res.unknown[metric.name] = registry.getSingleMetricAsString(
-                    metric.name,
-                );
+                res.unknown[metric.name] = await registry.getSingleMetricAsString(metric.name);
             }
         }
 
@@ -227,28 +230,26 @@ export namespace MetricsService {
         return msg.trimEnd();
     }
 
-    export function gauge(name: string, value: GaugeValueCollector): void {
+    export function gauge(name: string, value: GaugeValueCollector, labels: Labels = {}): void {
         const gaugeMetricName = `${metricsPrefix}${name}`;
-        if (!gauges.has(gaugeMetricName)) {
-            gauges.set(gaugeMetricName, value);
+        const key = seriesName(gaugeMetricName, labels);
+        if (!gauges.has(key)) {
+            gauges.set(key, {name: gaugeMetricName, labels: {...labels}, collect: value});
         }
     }
 
-    export function timer(name: string, conf?: TimerConfiguration): Timer {
-        const timerMetricName = `timer_${metricsPrefix}${name}`;
-        let existing = registry.getSingleMetric(timerMetricName) as metrics.Summary<string>;
-        if (!existing) {
-            existing = new metrics.Summary({
-                name: timerMetricName,
-                help: timerMetricName,
-                ageBuckets: option(conf).map(x => x.ageBuckets).orUndefined,
-                maxAgeSeconds: option(conf).map(x => x.maxAgeSeconds).orUndefined,
-                pruneAgedBuckets: option(conf).map(x => x.pruneAgedBuckets).getOrElseValue(false),
-            });
-            registry.registerMetric(existing);
-        }
-
-        return new Timer(existing);
+    export function timer(name: string, conf?: TimerConfiguration, labels: Labels = {}): Timer {
+        const metric = getMetric(`timer_${metricsPrefix}${name}`, labels, (name, labelNames) =>
+            new metrics.Summary({
+                name,
+                help: name,
+                labelNames,
+                registers: [registry],
+                ageBuckets: conf?.ageBuckets,
+                maxAgeSeconds: conf?.maxAgeSeconds,
+                pruneAgedBuckets: conf?.pruneAgedBuckets ?? false,
+            }));
+        return new Timer(metric.labels(...Object.keys(labels).sort().map(name => labels[name])));
     }
 
 }
@@ -279,7 +280,7 @@ export function Metric(name?: string | MetricConfiguration): MethodDecorator {
                     pruneAgedBuckets: opt.flatMap(x => option(x.pruneAgedBuckets)).orUndefined,
                     maxAgeSeconds: opt.flatMap(x => option(x.maxAgeSeconds)).orUndefined,
                     ageBuckets: opt.flatMap(x => option(x.ageBuckets)).orUndefined,
-                })
+                }, opt.flatMap(x => option(x.labels)).orUndefined)
                     .time(() => target.apply(thisArg, args));
             }
         });
@@ -312,6 +313,7 @@ export interface TimerConfiguration {
 }
 
 export interface MetricConfiguration {
+    readonly labels?: Labels;
     readonly name?: string;
     readonly maxAgeSeconds?: number;
     readonly ageBuckets?: number;
@@ -320,7 +322,7 @@ export interface MetricConfiguration {
 
 class Timer {
 
-    constructor(private readonly h: metrics.Summary<string>) {
+    constructor(private readonly h: metrics.Summary.Internal<string>) {
     }
 
     time<T>(body: () => T | Promise<T>): T | Promise<T> {
